@@ -1,0 +1,130 @@
+CSE508: Network Security, Fall 2017
+Homework 1 Solutions: Passive Network Monitoring
+Name: Saraj Munjal
+NetID: smunjal
+ID #: 111497962
+-------------------------------------------------------------------------------
+
+ 1.1 How many packets does the trace contain?
+ Ans:  32664
+ Command: tcpdump -n -r hw1.pcap | wc -l
+
+ 1.2 How many ARP packets and how many UDP packets?
+ Ans: a.) #ARP packets: 11304 , Command: tcpdump -n -r hw1.pcap arp | wc -l
+      b.) #UDP packets: 18382 , tcpdump -n -r hw1.pcap udp | wc -l
+
+ 1.3 How many packets were exchanged between 192.168.0.200 and 91.189.90.40?
+ Ans: 28
+ Command: tcpdump -n -r hw1.pcap '(src 192.168.0.200 and dst 91.189.90.40) or (src 91.189.90.40 and dst 192.168.0.200)' | wc -l
+
+ 1.4 Print the unique source IP addresses found in the trace.
+ Ans: 192.168.0.1, 192.168.0.11, 0.0.0.0, 192.168.0.12, 192.168.0.10, 192.168.0.7, 192.168.0.5, 192.168.0.3, 192.168.0.200, 122.154.101.54, 192.168.0.6, 130.75.16.5, 92.240.68.152, 194.168.4.100, 87.98.246.8, 216.137.63.121, 159.148.96.184, 91.189.92.190, 91.189.88.33, 91.189.91.15, 46.51.197.89, 91.189.90.40, 62.252.170.91, 91.189.89.88, 216.137.63.137, 46.51.197.88, 91.189.90.41, 62.252.170.81, 169.254.56.55, 87.230.23.162, 91.189.91.14, 1.234.31.20, 192.168.0.2
+ Command: tcpdump -n -r hw1.pcap | awk '!a[$3]++ {print $3}' | awk -F. '{print $1"."$2"."$3"."$4}' | awk '!a[$1]++ {print}' | awk '{if ($1~/[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/) print $1}' | xargs |  sed -e 's/ /, /g'
+
+ 1.5 Print the unique private network (according to RFC1918) source IP
+     addresses found in the trace.
+ Ans: 192.168.0.1, 192.168.0.2, 192.168.0.3, 192.168.0.5, 192.168.0.6, 192.168.0.7, 192.168.0.10, 192.168.0.11, 192.168.0.12, 192.168.0.200
+ Command: tcpdump -n -r hw1.pcap '(src net 10.0.0.0/8) or (src net 172.16.0.0/12) or (src net 192.168.0.0/16)' | awk '$3~/[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/{print $3}' | awk -F. '{print $1"."$2"."$3"."$4}' | sort -t$'.' -k4n | uniq | xargs | sed -e 's/ /, /g'
+
+ 1.6 Print the unique destination IP addresses found in the trace.
+ Ans: 192.168.0.12, 239.255.255.250, 192.168.0.2, 192.168.0.6, 192.168.0.10, 192.168.0.11, 224.0.0.22:, 224.0.0.252, 255.255.255.255, 169.254.255.255, 192.168.0.1, 192.168.0.255, 86.0.32.1, 192.168.0.7, 192.168.0.5, 224.0.0.251, 192.168.0.3, 224.0.0.253, 192.168.0.200, 122.154.101.54, 10.38.136.1, 130.75.16.5, 92.240.68.152, 194.168.4.100, 87.98.246.8, 216.137.63.121, 159.148.96.184, 91.189.91.15, 91.189.88.33, 91.189.92.190, 46.51.197.89, 91.189.90.40, 62.252.170.91, 91.189.89.88, 216.137.63.137, 46.51.197.88, 91.189.90.41, 62.252.170.81, 192.168.0.4, 87.230.23.162, 91.189.91.14, 224.0.0.251:, 192.168.100.5, 192.168.0.171, 10.38.136.250, 1.234.31.20, 192.168.0.200:
+ Command: tcpdump -n -r hw1.pcap | awk '!a[$5]++ {print $5}' | awk -F. '{print $1"."$2"."$3"."$4}' | awk '!a[$1]++ {print}' | awk '{if ($1~/[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/) print $1}' | xargs |  sed -e 's/ /, /g'
+
+ 1.7 What are the top-5 TCP and top-5 UDP destination ports?
+ Ans: Top TCP ports: 80, 54634, 49836, 47110, 40341 || Top UDP ports: 1900, 137, 5355, 5353, 138
+ Command: a.) For TCP dest ports: tcpdump -n -r hw1.pcap tcp | awk '{print $5}' | awk -F. '{print $5}' | awk -F: '{print $1}' | sort | uniq -c | sort -k1,1nr | head -5 | awk '{print $2}' | xargs | sed -e 's/ /, /g'
+          b.) For UDP dest ports: tcpdump -n -r hw1.pcap udp | awk '{print $5}' | awk -F. '{print $5}' | awk -F: '{print $1}' | sort | uniq -c | sort -k1,1nr | head -5 | awk '{print $2}' | xargs | sed -e 's/ /, /g'
+
+ 1.8 How many TCP packets have the SYN flag set?
+ Ans: 75
+ Command: tcpdump -n -r hw1.pcap 'tcp[13] & 2 != 0' | wc -l
+ Alternate command: tcpdump -n -r hw1.pcap tcp | awk '$7~/S/ {print $7}' | wc -l
+
+ 1.9 How many TCP connection attempts were made?
+ Ans: 37
+ Command: tcpdump -n -r hw1.pcap 'tcp[13]==2' | wc -l
+
+ 1.10 Towards which ports were TCP connection attempts made? How many attempts
+     per port?
+ Ans: #conn attempts    #port
+      33                80
+      2                 9100
+      1                 443
+      1                 465
+ Command: tcpdump -n -r hw1.pcap 'tcp[13]==2' | awk '{print $5}' | awk -F. '{print $5}' | awk -F: '{print $1}' | sort | uniq -c | sort -k1,1nr
+
+1.11 How many HTTP GET requests were made? Print the URLs of all HTTP requests
+     for JPG files.
+Ans: # HTTP Requests = 94, Command:  tcpdump -n -r hw1.pcap 'tcp[((tcp[12:1] & 0xf0) >> 2):4] = 0x47455420' | wc -l
+     JPG URLs: http://pic.leech.it/i/f166c/479246b0asttas.jpg, /i/f166c/479246b0asttas.jpg, http://ecx.images-amazon.com/images/I/41oZ1XsiOAL._SL500_AA300_.jpg, http://www.nature.com/news/2009/090527/images/459492a-i1.0.jpg, /news/2009/090527/images/459492a-i1.0.jpg
+     Command: tcpdump -n -r hw1.pcap 'tcp[((tcp[12:1] & 0xf0) >> 2):4] = 0x47455420' | awk -F, '{print $8}' | awk '$5~/.jpg/ {print $5}' | xargs | sed -e 's/ /, /g'
+
+1.12 When (date and time) was the first and last packet of the trace sent?
+Ans: First packet: 2013-01-12 12:37:42, Command: tcpdump -n -r hw1.pcap -tttt | awk '{print $1" "$2}' | awk -F. '{print $1}' | head -1
+     Last packet: 2013-01-14 14:27:03 , Command: tcpdump -n -r hw1.pcap -tttt | awk '{print $1" "$2}' | awk -F. '{print $1}' | tail -1
+
+1.13 What is the brand of the device that sent most of the packets? What is its
+     IP address?
+Ans:
+    MAC Address       IP Address  Manufacturer
+    c4:3d:c7:17:6f:9b 192.168.0.1 NETGEAR
+Command: tcpdump -n -r hw1.pcap -e | awk '$10~/[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/{print $2"|"$10}' | awk -F. '{print $1"."$2"."$3"."$4}' | sort | uniq -c | sort -k1nr | head -1 | awk '{print $2}' | awk -F '|' '{print $1" "$2}' | awk '{
+    cmd = "curl https://api.macvendors.com/" $1
+    while (cmd | getline line) {
+        print $1" "$2" "line
+    }
+    close(cmd)
+}'
+
+1.14 Report the distribution of Ethernet packet sizes (how many packets of size
+     X exist in the trace, for all values of X in the trace).
+     Ans:
+      Size  Frequency
+      14		3
+      20		4
+      21		232
+      22		887
+      23		4
+      24		375
+      26		8
+      27		6
+      40		48
+      56		1
+      123		60
+      125		62
+      133		146
+      276		85
+      284		85
+      289		2759
+      296		86
+      298		2749
+      300		86
+      320		86
+      344		88
+      348		87
+      350		87
+      352		86
+      353		2759
+      356		85
+      363		2758
+      433		164
+      434		10
+      442		164
+      443		10
+      485		158
+      486		10
+      497		162
+      498		10
+      499		155
+      500		10
+      513		161
+      514		10
+      624		12
+      656		22
+      774		8
+      775		5
+      991		40
+      992		6
+      993		4
+
+      Command: tcpdump -n -r hw1.pcap | awk -F, '$2~/length/ {print $2}' | awk '{print $2}' | sort | uniq -c | awk '{print $2"\t\t"$1}' | sort -k1n
