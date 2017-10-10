@@ -129,32 +129,61 @@ custom_args parse_cli_arguments(int argc, char **argv) {
 
     printf("interface = %s, file_name = %s, string = %s\n",
            args->interface_name, args->input_file_name, args->payload_search_string);
-
-    args->expression = argv[index];
+    if (optind < argc -1) {
+        args->expression = argv[optind];
+    }
     return *args;
 }
 
 int main(int argc, char **argv) {
-    parse_cli_arguments(argc, argv);    
+    custom_args args = parse_cli_arguments(argc, argv);
+
     char errbuf[PCAP_ERRBUF_SIZE];
-    char *device = pcap_lookupdev(errbuf);
+    char *device = (args.interface_name == NULL) ? pcap_lookupdev(errbuf) : args.interface_name;
+    bpf_u_int32 net;
+    bpf_u_int32 mask;
     if (device == NULL) {
         std::cout << "Error occurred:" << errbuf << std::endl;
     } else {
         std::cout << "Device found: " << device << std::endl;
     }
-    pcap_t *session = pcap_open_live(device, BUFSIZ, 1, 1000, errbuf);
+    if (pcap_lookupnet(device, &net, &mask, errbuf) == -1) {
+        fprintf(stderr, "Can't get netmask for device %s\n", device);
+        net = 0;
+        mask = 0;
+    }
+    pcap_t *session;
+    if (args.input_file_name != NULL) {
+        FILE *input_file = fopen(args.input_file_name, "r");
+        session = pcap_fopen_offline(input_file, errbuf);
+    } else {
+        session = pcap_open_live(device, BUFSIZ, 1, 1000, errbuf);
+    }
+
     if (session == NULL) {
         printf("Failed to open session for device:%s", device);
         return 2;
     }
+    struct bpf_program filter;
+    if (args.expression != NULL) {
+        if (pcap_compile(session, &filter, args.expression, 0, net) == -1) {
+            fprintf(stderr, "Couldn't parse filter %s: %s\n", args.expression, pcap_geterr(session));
+            return (2);
+        } else {
+            if (pcap_setfilter(session, &filter) == -1) {
+                fprintf(stderr, "Couldn't install filter %s: %s\n", args.expression, pcap_geterr(session));
+                return (2);
+            }
+        }
+    }
+
     struct pcap_pkthdr header;
 //    const u_char* packet = pcap_next(session, &header);
     pcap_next(session, &header);
     /* Print its length */
     printf("Jacked a packet with length of [%d]\n", header.len);
     FILE *fp = stdout;
-    pcap_loop(session, 100, got_packet, (u_char *) fp);
+    pcap_loop(session, 100000, got_packet, (u_char *) fp);
     pcap_close(session);
     return 0;
 }
