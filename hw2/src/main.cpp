@@ -6,11 +6,26 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include "sniffer.h"
-
+#include <ctime>
 #define SIZE_ETHERNET 14
 
 void print_payload(u_char *payload, int size_payload) {
     printf("Payload(size:%d) : %s\n", size_payload, payload);
+}
+
+char *get_formatted_time(const pcap_pkthdr *pkt_header) {
+    struct timeval tv;
+    time_t nowtime;
+    struct tm *nowtm;
+    char *tmbuf = (char *) malloc(64 * sizeof(char));
+    char *buf = (char *) malloc(64 * sizeof(char));
+
+
+    nowtime = pkt_header->ts.tv_sec;
+    nowtm = localtime(&nowtime);
+    strftime(tmbuf, 64, "%Y-%m-%d %H:%M:%S", nowtm);
+    snprintf(buf, 64, "%s.%06ld", tmbuf, (long)tv.tv_usec);
+    return buf;
 }
 
 void got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet) {
@@ -26,8 +41,8 @@ void got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *pa
     int size_ip;
     int size_tcp;
     int size_payload;
-
     fprintf(fp, "\nPacket number %d:\n", count);
+    fprintf(fp, "Packet time %s:\n", get_formatted_time(header));
     count++;
 
     /* define ethernet header */
@@ -129,7 +144,7 @@ custom_args parse_cli_arguments(int argc, char **argv) {
 
     printf("interface = %s, file_name = %s, string = %s\n",
            args->interface_name, args->input_file_name, args->payload_search_string);
-    if (optind < argc -1) {
+    if (optind < argc - 1) {
         args->expression = argv[optind];
     }
     return *args;
