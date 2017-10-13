@@ -63,11 +63,10 @@ typedef struct tcp_header {
 } tcp_header_t;
 
 typedef struct udp_header {
-    u_short th_sport;	/* source port */
-    u_short th_dport;	/* destination port */
-    u_char th_offx2;	/* data offset, rsvd */
-    u_short th_len;		/* window */
-    u_short th_sum;		/* checksum */
+    u_short uh_sport;	/* source port */
+    u_short uh_dport;	/* destination port */
+    u_short uh_len;		/* length */
+    u_short uh_sum;		/* checksum */
 } udp_header_t;
 
 typedef struct icmp_header {
