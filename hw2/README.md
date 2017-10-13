@@ -8,6 +8,11 @@
 
 ### Format of packets
 
+### Build instructions
+1. `cd PROJECT_DIR`
+2. `make clean`
+3. `make`
+4. Run using `sudo ./bin/mydump [options]`
 
 ### Arguments supported
 1. [-i] (optional): specify name of interface to listen on
@@ -17,7 +22,7 @@
 
 Example:
 
-`sudo ./mydump -i en0 -s MyAdmin -r ../docs/hw1.pcap "port 80"`
+`sudo ./bin/mydump -i en0 -s MyAdmin -r ../docs/hw1.pcap "port 80"`
  
 * Name: Saraj Munjal
 * NetID: smunjal

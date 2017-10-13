@@ -233,10 +233,6 @@ custom_args parse_cli_arguments(int argc, char **argv) {
                 abort();
         }
     }
-
-
-    printf("interface = %s, file_name = %s, string = %s\n",
-           args->interface_name, args->input_file_name, args->payload_search_string);
     args->expression = argv[optind];
     return *args;
 }
