@@ -99,7 +99,7 @@ char *get_formatted_time(timeval ts) {
     while (usec >= 1000000 - 1) {
         usec = usec / 10;
     }
-    snprintf(buf, 64, "%s.%ld", tmbuf,usec);
+    snprintf(buf, 64, "%s.%ld", tmbuf, usec);
     return buf;
 }
 
@@ -107,15 +107,21 @@ void print_packet_data(print_packet_info_t *info) {
     /* define/compute ip header offset */
     FILE *fp = info->output_fp;
     fprintf(fp, "%s %s -> %s type 0x%03x len %d\n", get_formatted_time(info->ts), get_mac_address(info->ether_src),
-            get_mac_address(info->ether_dst), info->ether_type, info->packet_len);
+            get_mac_address(info->ether_dst), info->ether_type, info->size_payload);
 
     /* print source and destination IP addresses */
     if (info->ether_type == ETHER_TYPE_IP) {
+        char *buf = inet_ntoa(info->ip_src);
+        char *ip_src = (char *) malloc(17 * sizeof(char));
+        strcpy(ip_src, buf);
+        buf = inet_ntoa(info->ip_dst);
+        char *ip_dst = (char *) malloc(17 * sizeof(char));
+        strcpy(ip_dst, buf);
         if (info->s_port != (u_short) -1 && info->d_port != (u_short) -1) {
-            fprintf(fp, "%s:%d -> %s:%d %s\n", inet_ntoa(info->ip_src), ntohs(info->s_port),
-                    inet_ntoa(info->ip_dst), ntohs(info->d_port), info->protocol);
+            fprintf(fp, "%s:%d -> %s:%d %s\n", ip_src, ntohs(info->s_port), ip_dst, ntohs(info->d_port),
+                    info->protocol);
         } else {
-            fprintf(fp, "%s -> %s %s\n", inet_ntoa(info->ip_src), inet_ntoa(info->ip_dst), info->protocol);
+            fprintf(fp, "%s -> %s %s\n", ip_src, ip_dst, info->protocol);
         }
     }
     if (info->size_payload > 0) {
@@ -139,13 +145,14 @@ void got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *pa
     info->ether_type = ntohs(ethernet_header->ether_type);
     info->s_port = (u_short) -1;
     info->d_port = (u_short) -1;
+    info->packet_len = header->len;
     switch (info->ether_type) {
         default:
             return;
 
         case ETHER_TYPE_ARP: {
-            int total_len = header->len;
-            info->packet_len = header->len;
+            int total_len = header->caplen;
+//            info->packet_len = header->len;
             info->size_payload = total_len - SIZE_ETHERNET;
             info->payload = (u_char *) (packet + SIZE_ETHERNET);
         }
@@ -154,11 +161,10 @@ void got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *pa
         case ETHER_TYPE_IP: {
             int size_ip;
             int size_protocol = 0;
-
             const ip_header_t *ip;
             ip = (ip_header_t *) (packet + SIZE_ETHERNET);
             size_ip = IP_HL(ip) * 4;
-            info->packet_len = size_ip + SIZE_ETHERNET;
+//            info->packet_len = size_ip + SIZE_ETHERNET;
             const u_char *packet_base_addr = packet + SIZE_ETHERNET + size_ip;
             switch (ip->ip_p) {
                 case IPPROTO_TCP: {
@@ -188,7 +194,8 @@ void got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *pa
                     info->protocol = (char *) "OTHER";
                     break;
             }
-            info->packet_len += size_protocol;
+//            info->packet_len += size_protocol;
+//            info->packet_len = size_protocol;
             info->ip_src = ip->ip_src;
             info->ip_dst = ip->ip_dst;
             info->payload = (u_char *) (packet + SIZE_ETHERNET + size_ip + size_protocol);
