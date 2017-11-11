@@ -13,8 +13,8 @@
 #include <fcntl.h>
 #include <errno.h>
 
-#define TIMEOUT 300
-#define BUFF_SIZE 1024
+#define TIMEOUT 0
+#define BUFF_SIZE 4096
 
 void error(char *str) {
     perror(str);
@@ -26,18 +26,25 @@ typedef struct program_args {
     unsigned int src_port;
     unsigned int is_server;
     char *key_file_path;
+    int is_debug;
 } args_t;
+
+args_t *args;
 
 args_t *parse_cli_arguments(int argc, char **argv) {
     args_t *args = (args_t *) malloc(sizeof(args_t));
     int c;
     opterr = 0;
     args->is_server = 0;
-    while ((c = getopt(argc, argv, "k:l:")) != -1) {
+    args->is_debug = 0;
+    while ((c = getopt(argc, argv, "k:l:d:")) != -1) {
         switch (c) {
             case 'l':
                 args->src_port = atoi(optarg);
                 args->is_server = 1;
+                break;
+            case 'd':
+                args->is_debug = 1;
                 break;
             case 'k':
                 args->key_file_path = optarg;
@@ -75,7 +82,6 @@ ssize_t write_to_socket(FILE *ofp, struct pollfd *sock_poll_fd, int dest_sock_fd
         return -1;
     }
     if (rv == 0) {
-        fprintf(ofp, "Timeout occurred!  Not ready for write after 3.5 seconds.\n");
         return -1;
     }
 
@@ -126,7 +132,9 @@ void client_file_to_socket(f2s_cmd_t *cmd) {
             (*cmd->conn_broken) = 1;
             break;
         }
-        fprintf(cmd->ofp, "msg: %s", buffer);
+        if (args->is_debug) {
+            fprintf(cmd->ofp, "send: %s", buffer);
+        }
         // wait for write ready
         ssize_t written_len = write_to_socket(cmd->ofp, cmd->pollfd, cmd->sock_fd, buffer, read_count);
         if (written_len < 0) {
@@ -137,7 +145,7 @@ void client_file_to_socket(f2s_cmd_t *cmd) {
 }
 
 int main(int argc, char **argv) {
-    args_t *args = parse_cli_arguments(argc, argv);
+    args = parse_cli_arguments(argc, argv);
     if (args == NULL) {
         perror("Some error occurred with input");
         return -2;
@@ -145,14 +153,15 @@ int main(int argc, char **argv) {
     int fwd_sock_fd, portno;
     struct sockaddr_in fwd_serv_addr;
     FILE *ifp = stdin;
-    FILE *ofp = fopen(args->is_server ? "./logs/server-log.txt" : "./logs/client-log.txt", "w");
+    FILE *ofp = !(args->is_debug) ? stderr : fopen(args->is_server ? "./logs/server-log.txt" : "./logs/client-log.txt",
+                                                   "w");
     portno = args->dest_port;
     char buffer[BUFF_SIZE];
     fwd_sock_fd = socket(AF_INET, SOCK_STREAM, 0);
     char *hostname = args->dest_addr;
     struct hostent *server = gethostbyname(hostname);
     if (server == NULL) {
-        fprintf(ofp, "Couldn't find any host with hostname: %s", hostname);
+        fprintf(stderr, "Couldn't find any host with hostname: %s", hostname);
         return -1;
     }
     bzero((char *) &fwd_serv_addr, sizeof(fwd_serv_addr));
@@ -194,7 +203,9 @@ int main(int argc, char **argv) {
         }
 
         while (1) {
-            fprintf(ofp, "\nServer waiting for client on port %d", args->src_port);
+            if (args->is_debug) {
+                fprintf(ofp, "\nServer waiting for client on port %d", args->src_port);
+            }
             if (listen(client_sock_fd, 5) == -1) {
                 perror("Error while trying to listen for client socket connection");
                 exit(1);
@@ -202,9 +213,12 @@ int main(int argc, char **argv) {
             fflush(ofp);
             size_t sin_size = sizeof(struct sockaddr_in);
             int connected_cli_socket_fd = accept(client_sock_fd, (struct sockaddr *) &in_client_addr, &sin_size);
-            fflush(ofp);
-            fprintf(ofp, "\n I got a connection from (%s , %d)",
-                    inet_ntoa(in_client_addr.sin_addr), ntohs(in_client_addr.sin_port));
+            if (args->is_debug) {
+                fprintf(ofp, "\n I got a connection from (%s , %d)",
+                        inet_ntoa(in_client_addr.sin_addr), ntohs(in_client_addr.sin_port));
+                fflush(ofp);
+            }
+
             struct pollfd in_client_rcv_ufd, in_client_send_ufd;
             in_client_rcv_ufd.fd = connected_cli_socket_fd;
             in_client_rcv_ufd.events = POLLIN | POLLPRI;
@@ -310,7 +324,6 @@ int main(int argc, char **argv) {
                 break;
             }
             bzero(buffer, BUFF_SIZE);
-            fflush(ofp);
             int rv = poll(&fwd_recv_ufd, 1, TIMEOUT);
 
             if (rv == -1) {
@@ -324,7 +337,9 @@ int main(int argc, char **argv) {
                         break;
                     }
                     write(STDOUT_FILENO, buffer, nrecv);
-                    fprintf(ofp, "%s", buffer);
+                    if (args->is_debug) {
+                        fprintf(ofp, "rcv: %s", buffer);
+                    }
                 }
                 if (fwd_recv_ufd.revents & POLLPRI) {
                     ssize_t nrecv = recv(fwd_sock_fd, buffer, BUFF_SIZE - 1, MSG_OOB); // out-of-band data
@@ -332,13 +347,15 @@ int main(int argc, char **argv) {
                         break;
                     }
                     write(STDOUT_FILENO, buffer, nrecv);
-                    fprintf(ofp, "%s", buffer);
+                    if (args->is_debug) {
+                        fprintf(ofp, "rcv: %s", buffer);
+                    }
                 }
             }
         }
         pthread_join(client_write_thread, NULL);
         if (conn_broken) {
-            fprintf(ofp, "Connection with server was broken");
+            fprintf(stderr, "Connection with server was broken");
         }
     }
 
