@@ -8,6 +8,13 @@
 #include <stdlib.h>
 #include <ctype.h>
 #include <poll.h>
+#include <arpa/inet.h>
+#include <pthread.h>
+#include <fcntl.h>
+#include <errno.h>
+
+#define TIMEOUT 300
+#define BUFF_SIZE 1024
 
 void error(char *str) {
     perror(str);
@@ -60,18 +67,87 @@ args_t *parse_cli_arguments(int argc, char **argv) {
     return args;
 }
 
+
+ssize_t write_to_socket(FILE *ofp, struct pollfd *sock_poll_fd, int dest_sock_fd, char *data, ssize_t data_len) {
+    int rv = poll(sock_poll_fd, 1, TIMEOUT);
+    if (rv == -1) {
+        perror("poll write error"); // error occurred in poll()
+        return -1;
+    }
+    if (rv == 0) {
+        fprintf(ofp, "Timeout occurred!  Not ready for write after 3.5 seconds.\n");
+        return -1;
+    }
+
+    // ready for write:
+    if ((*sock_poll_fd).revents & POLLOUT) {
+        return write(dest_sock_fd, data, data_len); // write
+    }
+    // error in polling
+//            if (send_ufd.revents & POLL_ERR) {
+//                perror("Error occurred while polling forward socket for write");
+//                break;
+//            }
+//
+    // check for poll hung up
+//            if (send_ufd.revents & POLL_HUP) {
+//                perror("Connection hung up while polling forward socket for write");
+//                break;
+//            }
+    return -1;
+}
+
+typedef struct f2s_command {
+    FILE *ifp;
+    struct pollfd *pollfd;
+    int sock_fd;
+    int *conn_broken;
+    FILE *ofp;
+} f2s_cmd_t;
+
+ssize_t read_fd(char *buf, size_t size, int fd) {
+    return read(fd, buf, size);
+}
+
+void client_file_to_socket(f2s_cmd_t *cmd) {
+    char buffer[BUFF_SIZE];
+    while (1) {
+        bzero(buffer, BUFF_SIZE);
+        fflush(cmd->ofp);
+        // block for stdin
+        ssize_t read_count = read_fd(buffer, BUFF_SIZE - 1, fileno(cmd->ifp));
+        if (read_count < 0 && errno == EAGAIN) {
+            continue;
+        }
+        if (read_count == 0) {
+            continue;
+        }
+        if (read_count < 0) {
+            (*cmd->conn_broken) = 1;
+            break;
+        }
+        fprintf(cmd->ofp, "msg: %s", buffer);
+        // wait for write ready
+        ssize_t written_len = write_to_socket(cmd->ofp, cmd->pollfd, cmd->sock_fd, buffer, read_count);
+        if (written_len < 0) {
+            (*cmd->conn_broken) = 1;
+            break;
+        }
+    }
+}
+
 int main(int argc, char **argv) {
     args_t *args = parse_cli_arguments(argc, argv);
     if (args == NULL) {
         perror("Some error occurred with input");
         return -2;
     }
-    int fwd_sock_fd, portno, n;
-    struct sockaddr_in serv_addr;
+    int fwd_sock_fd, portno;
+    struct sockaddr_in fwd_serv_addr;
     FILE *ifp = stdin;
-    FILE *ofp = stdout;
+    FILE *ofp = fopen(args->is_server ? "./logs/server-log.txt" : "./logs/client-log.txt", "w");
     portno = args->dest_port;
-    char buffer[1024];
+    char buffer[BUFF_SIZE];
     fwd_sock_fd = socket(AF_INET, SOCK_STREAM, 0);
     char *hostname = args->dest_addr;
     struct hostent *server = gethostbyname(hostname);
@@ -79,125 +155,193 @@ int main(int argc, char **argv) {
         fprintf(ofp, "Couldn't find any host with hostname: %s", hostname);
         return -1;
     }
-    bzero((char *) &serv_addr, sizeof(serv_addr));
-    serv_addr.sin_family = AF_INET;
+    bzero((char *) &fwd_serv_addr, sizeof(fwd_serv_addr));
+    fwd_serv_addr.sin_family = AF_INET;
     bcopy((char *) server->h_addr,
-          (char *) &serv_addr.sin_addr.s_addr,
+          (char *) &fwd_serv_addr.sin_addr.s_addr,
           server->h_length);
-    serv_addr.sin_port = htons(portno);
-    if (connect(fwd_sock_fd, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0) {
+    fwd_serv_addr.sin_port = htons(portno);
+    if (connect(fwd_sock_fd, (struct sockaddr *) &fwd_serv_addr, sizeof(fwd_serv_addr)) < 0) {
         error("ERROR connecting to server");
         return 0;
     }
-    struct pollfd recv_ufd, send_ufd;
-    recv_ufd.fd = fwd_sock_fd;
-    recv_ufd.events = POLLIN | POLLPRI;
+    struct pollfd fwd_recv_ufd, fwd_send_ufd;
+    fwd_recv_ufd.fd = fwd_sock_fd;
+    fwd_recv_ufd.events = POLLIN | POLLPRI;
 
-    send_ufd.fd = fwd_sock_fd;
-    send_ufd.events = POLLOUT;
-    fprintf(ofp, "Please enter the message: ");
-    bzero(buffer, 1024);
-
-    while (1) {
-        bzero(buffer, 1024);
-        // block for stdin
-        fgets(buffer, 1023, ifp);
-        // wait for write ready
-        int rv = poll(&send_ufd, 1, 3500);
-        if (rv == -1) {
-            perror("poll write error"); // error occurred in poll()
-            break;
-        } else if (rv == 0) {
-            printf("Timeout occurred!  Not ready for write after 3.5 seconds.\n");
-        } else {
-            // ready for write:
-            if (send_ufd.revents & POLLOUT) {
-                write(fwd_sock_fd, buffer, 1023); // write
-            }
-            // error in polling
-//            if (send_ufd.revents & POLL_ERR) {
-//                perror("Error occurred while polling forward socket for write");
-//                break;
-//            }
-//
-            // check for poll hung up
-//            if (send_ufd.revents & POLL_HUP) {
-//                perror("Connection hung up while polling forward socket for write");
-//                break;
-//            }
+    fwd_send_ufd.fd = fwd_sock_fd;
+    fwd_send_ufd.events = POLLOUT;
+    bzero(buffer, BUFF_SIZE);
+    if (args->is_server) {
+        struct sockaddr_in in_client_addr;
+        int client_sock_fd;
+        if ((client_sock_fd = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
+            perror("Error while creating client socket file descriptor");
+            exit(1);
+        }
+        int true = 1;
+        if (setsockopt(client_sock_fd, SOL_SOCKET, SO_REUSEADDR, &true, sizeof(int)) == -1) {
+            perror("Error in Setsockopt for client socket");
+            exit(1);
+        }
+        in_client_addr.sin_family = AF_INET;
+        in_client_addr.sin_port = htons(args->src_port);
+        in_client_addr.sin_addr.s_addr = INADDR_ANY;
+        bzero(&(in_client_addr.sin_zero), 8);
+        if (bind(client_sock_fd, (struct sockaddr *) &in_client_addr, sizeof(struct sockaddr)) == -1) {
+            perror("Unable to bind incoming client socket with client file descriptor");
+            exit(1);
         }
 
-        rv = poll(&recv_ufd, 1, 3500);
+        while (1) {
+            fprintf(ofp, "\nServer waiting for client on port %d", args->src_port);
+            if (listen(client_sock_fd, 5) == -1) {
+                perror("Error while trying to listen for client socket connection");
+                exit(1);
+            }
+            fflush(ofp);
+            size_t sin_size = sizeof(struct sockaddr_in);
+            int connected_cli_socket_fd = accept(client_sock_fd, (struct sockaddr *) &in_client_addr, &sin_size);
+            fflush(ofp);
+            fprintf(ofp, "\n I got a connection from (%s , %d)",
+                    inet_ntoa(in_client_addr.sin_addr), ntohs(in_client_addr.sin_port));
+            struct pollfd in_client_rcv_ufd, in_client_send_ufd;
+            in_client_rcv_ufd.fd = connected_cli_socket_fd;
+            in_client_rcv_ufd.events = POLLIN | POLLPRI;
 
-        if (rv == -1) {
-            perror("read poll errpr"); // error occurred in poll()
-        } else if (rv == 0) {
-            printf("Timeout occurred!  No read data after 3.5 seconds.\n");
-        } else {
-            // check for events on s1:
-            if (recv_ufd.revents & POLLIN) {
-                recv(fwd_sock_fd, buffer, 1023, 0); // receive normal data
-                fprintf(ofp, "%s", buffer);
-            }
-            if (recv_ufd.revents & POLLPRI) {
-                recv(fwd_sock_fd, buffer, 1023, MSG_OOB); // out-of-band data
-                fprintf(ofp, "%s", buffer);
-            }
+            in_client_send_ufd.fd = connected_cli_socket_fd;
+            in_client_send_ufd.events = POLLOUT;
+            while (1) {
+                bzero(buffer, BUFF_SIZE);
+                int rv = poll(&in_client_rcv_ufd, 1, TIMEOUT);
+
+                if (rv == -1) {
+                    perror("Error occurred in polling incoming client socket for reading."); // error occurred in poll()
+                } else if (rv == 0) {
+//                    printf("Timeout occurred!  No incoming data read from client after 3.5 seconds.\n");
+                } else {
+                    // check for events on s1:
+                    if (in_client_rcv_ufd.revents & POLLIN) {
+                        ssize_t nrecv = recv(connected_cli_socket_fd, buffer, BUFF_SIZE - 1, 0); // receive normal data
+                        if (nrecv < 0) {
+                            break;
+                        }
+                        write_to_socket(ofp, &fwd_send_ufd, fwd_sock_fd, buffer, nrecv);
+                    }
+                    if (in_client_rcv_ufd.revents & POLLPRI) {
+                        ssize_t nrecv = recv(connected_cli_socket_fd, buffer, BUFF_SIZE - 1, MSG_OOB);
+                        if (nrecv < 0) {
+                            break;
+                        }
+                        write_to_socket(ofp, &fwd_send_ufd, fwd_sock_fd, buffer, nrecv);
+                    }
 
 //            // error in polling
 //            if (send_ufd.revents & POLL_ERR) {
 //                perror("Error occurred while polling forward socket for read");
 //                break;
 //            }
-            // check for poll hung up
+                    // check for poll hung up
+//                    if (in_client_rcv_ufd.revents & POLL_HUP) {
+//                        perror("Connection hung up while polling forward socket for read");
+//                        break;
+//                    }
+                }
+
+                bzero(buffer, BUFF_SIZE);
+                // wait for message from forward socket
+                rv = poll(&fwd_recv_ufd, 1, TIMEOUT);
+
+                if (rv == -1) {
+                    perror("Error occurred in polling forward server socket for reading."); // error occurred in poll()
+                } else if (rv == 0) {
+//                    printf("Timeout occurred!  No incoming data read from forward server after 3.5 seconds.\n");
+                } else {
+                    // check for events on s1:
+                    if (fwd_recv_ufd.revents & POLLIN) {
+                        ssize_t nrecv = recv(fwd_sock_fd, buffer, BUFF_SIZE - 1, 0); // receive normal data
+                        if (nrecv < 0) {
+                            break;
+                        }
+                        write_to_socket(ofp, &in_client_send_ufd, connected_cli_socket_fd, buffer, nrecv);
+                    }
+                    if (fwd_recv_ufd.revents & POLLPRI) {
+                        ssize_t nrecv = recv(fwd_sock_fd, buffer, BUFF_SIZE - 1, MSG_OOB); // out-of-band data
+                        if (nrecv < 0) {
+                            break;
+                        }
+                        write_to_socket(ofp, &in_client_send_ufd, connected_cli_socket_fd, buffer, nrecv);
+                    }
+
+//            // error in polling
+//            if (send_ufd.revents & POLL_ERR) {
+//                perror("Error occurred while polling forward socket for read");
+//                break;
+//            }
+                    // check for poll hung up
 //            if (send_ufd.revents & POLL_HUP) {
 //                perror("Connection hung up while polling forward socket for read");
 //                break;
 //            }
+                }
+
+            }
+        }
+    } else {
+        pthread_t client_write_thread;
+        f2s_cmd_t cmd;
+        int conn_broken = 0;
+        cmd.ifp = ifp;
+        cmd.ofp = ofp;
+        cmd.sock_fd = fwd_sock_fd;
+        cmd.pollfd = &fwd_send_ufd;
+        cmd.conn_broken = &conn_broken;
+        int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
+        if (fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK)) {
+            perror("Failed to make stdin non-blocking\n");
+            return -2;
+        }
+        if (pthread_create(&client_write_thread, NULL, client_file_to_socket, &cmd) != 0) {
+            perror("Error creating separate client writing thread: ");
+            return -2;
+        }
+        while (1) {
+            if (conn_broken) {
+                break;
+            }
+            bzero(buffer, BUFF_SIZE);
+            fflush(ofp);
+            int rv = poll(&fwd_recv_ufd, 1, TIMEOUT);
+
+            if (rv == -1) {
+                perror("read poll error"); // error occurred in poll()
+            } else if (rv == 0) {
+//                fprintf(f"Timeout occurred!  No read data after 3.5 seconds.\n");
+            } else {
+                if (fwd_recv_ufd.revents & POLLIN) {
+                    ssize_t nrecv = recv(fwd_sock_fd, buffer, BUFF_SIZE - 1, 0); // receive normal data
+                    if (nrecv <= 0) {
+                        break;
+                    }
+                    write(STDOUT_FILENO, buffer, nrecv);
+                    fprintf(ofp, "%s", buffer);
+                }
+                if (fwd_recv_ufd.revents & POLLPRI) {
+                    ssize_t nrecv = recv(fwd_sock_fd, buffer, BUFF_SIZE - 1, MSG_OOB); // out-of-band data
+                    if (nrecv <= 0) {
+                        break;
+                    }
+                    write(STDOUT_FILENO, buffer, nrecv);
+                    fprintf(ofp, "%s", buffer);
+                }
+            }
+        }
+        pthread_join(client_write_thread, NULL);
+        if (conn_broken) {
+            fprintf(ofp, "Connection with server was broken");
         }
     }
-    /*while (writing || reading) {
 
-        // write_loop
-        while (1) {
-            bzero(buffer, 1024);
-            printf("w");
-//            int read_in = read(STDIN_FILENO, buffer, 1023);
-//            if (read_in < 0) {
-//                error("Failed to read from stdin");
-//                break;
-//            }
-//            printf("%d", read_in);
-//            if (read_in == 0) {
-//                printf("z");
-//                break;
-//            }
-//            buffer[read_in] = '\0';
-            char *inp = fgets(buffer, 1023, ifp);
-            if (strlen(buffer) < 1023) {
-                // probably no more input. Let's break.
-                break;
-            }
-            n = write(fwd_sock_fd, buffer, strlen(buffer));
-            if (n < 0) {
-                error("ERROR writing to socket");
-                break;
-            }
-        }
-        bzero(buffer, 1024);
-        //read_loop
-        while (1) {
-            n = recv(fwd_sock_fd, buffer, 1023, NULL);
-            if (n < 0) {
-                error("ERROR reading from socket");
-                break;
-            }
-            if (n == 0) {
-                break;
-            } else {
-                printf("%s\n", buffer);
-            }
-        }*/
     close(fwd_sock_fd);
     return 0;
 }
