@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <ctype.h>
+#include <poll.h>
 
 void error(char *str) {
     perror(str);
@@ -65,13 +66,13 @@ int main(int argc, char **argv) {
         perror("Some error occurred with input");
         return -2;
     }
-    int sockfd, portno, n;
+    int fwd_sock_fd, portno, n;
     struct sockaddr_in serv_addr;
     FILE *ifp = stdin;
     FILE *ofp = stdout;
     portno = args->dest_port;
     char buffer[1024];
-    sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    fwd_sock_fd = socket(AF_INET, SOCK_STREAM, 0);
     char *hostname = args->dest_addr;
     struct hostent *server = gethostbyname(hostname);
     if (server == NULL) {
@@ -84,45 +85,109 @@ int main(int argc, char **argv) {
           (char *) &serv_addr.sin_addr.s_addr,
           server->h_length);
     serv_addr.sin_port = htons(portno);
-    if (connect(sockfd, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0) {
-        error("ERROR connecting");
+    if (connect(fwd_sock_fd, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0) {
+        error("ERROR connecting to server");
         return 0;
     }
-    printf("Please enter the message: ");
+    struct pollfd recv_ufd, send_ufd;
+    recv_ufd.fd = fwd_sock_fd;
+    recv_ufd.events = POLLIN | POLLPRI;
+
+    send_ufd.fd = fwd_sock_fd;
+    send_ufd.events = POLLOUT;
+    fprintf(ofp, "Please enter the message: ");
     bzero(buffer, 1024);
-    int reading = 1;
-    int writing = 1;
-    while (writing || reading) {
+
+    while (1) {
+        bzero(buffer, 1024);
+        // block for stdin
+        fgets(buffer, 1023, ifp);
+        // wait for write ready
+        int rv = poll(&send_ufd, 1, 3500);
+        if (rv == -1) {
+            perror("poll write error"); // error occurred in poll()
+            break;
+        } else if (rv == 0) {
+            printf("Timeout occurred!  Not ready for write after 3.5 seconds.\n");
+        } else {
+            // ready for write:
+            if (send_ufd.revents & POLLOUT) {
+                write(fwd_sock_fd, buffer, 1023); // write
+            }
+            // error in polling
+//            if (send_ufd.revents & POLL_ERR) {
+//                perror("Error occurred while polling forward socket for write");
+//                break;
+//            }
+//
+            // check for poll hung up
+//            if (send_ufd.revents & POLL_HUP) {
+//                perror("Connection hung up while polling forward socket for write");
+//                break;
+//            }
+        }
+
+        rv = poll(&recv_ufd, 1, 3500);
+
+        if (rv == -1) {
+            perror("read poll errpr"); // error occurred in poll()
+        } else if (rv == 0) {
+            printf("Timeout occurred!  No read data after 3.5 seconds.\n");
+        } else {
+            // check for events on s1:
+            if (recv_ufd.revents & POLLIN) {
+                recv(fwd_sock_fd, buffer, 1023, 0); // receive normal data
+                fprintf(ofp, "%s", buffer);
+            }
+            if (recv_ufd.revents & POLLPRI) {
+                recv(fwd_sock_fd, buffer, 1023, MSG_OOB); // out-of-band data
+                fprintf(ofp, "%s", buffer);
+            }
+
+//            // error in polling
+//            if (send_ufd.revents & POLL_ERR) {
+//                perror("Error occurred while polling forward socket for read");
+//                break;
+//            }
+            // check for poll hung up
+//            if (send_ufd.revents & POLL_HUP) {
+//                perror("Connection hung up while polling forward socket for read");
+//                break;
+//            }
+        }
+    }
+    /*while (writing || reading) {
 
         // write_loop
         while (1) {
             bzero(buffer, 1024);
-            int read_in = read(STDIN_FILENO, buffer, 1023);
-            if (read_in < 0) {
-                error("Failed to read from stdin");
+            printf("w");
+//            int read_in = read(STDIN_FILENO, buffer, 1023);
+//            if (read_in < 0) {
+//                error("Failed to read from stdin");
+//                break;
+//            }
+//            printf("%d", read_in);
+//            if (read_in == 0) {
+//                printf("z");
+//                break;
+//            }
+//            buffer[read_in] = '\0';
+            char *inp = fgets(buffer, 1023, ifp);
+            if (strlen(buffer) < 1023) {
+                // probably no more input. Let's break.
                 break;
             }
-            if (read_in == 0) {
-                //
-                break;
-            }
-            buffer[read_in] = '\0';
-            n = write(sockfd, buffer, strlen(buffer));
+            n = write(fwd_sock_fd, buffer, strlen(buffer));
             if (n < 0) {
                 error("ERROR writing to socket");
                 break;
             }
-            if (n == 0) {
-                // nothing to write
-                continue;
-            }
         }
-
-
         bzero(buffer, 1024);
         //read_loop
         while (1) {
-            n = recv(sockfd, buffer, 1023, NULL);
+            n = recv(fwd_sock_fd, buffer, 1023, NULL);
             if (n < 0) {
                 error("ERROR reading from socket");
                 break;
@@ -132,8 +197,7 @@ int main(int argc, char **argv) {
             } else {
                 printf("%s\n", buffer);
             }
-        }
-    }
-    close(sockfd);
+        }*/
+    close(fwd_sock_fd);
     return 0;
 }
