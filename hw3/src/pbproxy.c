@@ -12,9 +12,12 @@
 #include <pthread.h>
 #include <fcntl.h>
 #include <errno.h>
+#include "crypto.c"
 
 #define TIMEOUT 0
-#define BUFF_SIZE 4096
+#define BUFF_SIZE 1024
+#define CRYPTO_KEY_LENGTH 32
+#define CRYPTO_IV_LENGTH 16
 
 void error(char *str) {
     perror(str);
@@ -31,51 +34,21 @@ typedef struct program_args {
 
 args_t *args;
 
-args_t *parse_cli_arguments(int argc, char **argv) {
-    args_t *args = (args_t *) malloc(sizeof(args_t));
-    int c;
-    opterr = 0;
-    args->is_server = 0;
-    args->is_debug = 0;
-    while ((c = getopt(argc, argv, "k:l:d:")) != -1) {
-        switch (c) {
-            case 'l':
-                args->src_port = atoi(optarg);
-                args->is_server = 1;
-                break;
-            case 'd':
-                args->is_debug = 1;
-                break;
-            case 'k':
-                args->key_file_path = optarg;
-                break;
-            case '?':
-                if (optopt == 'l' || optopt == 'k') {
-                    fprintf(stderr, "Option -%c requires an argument. Char : %c\n", optopt, c);
-                } else if (isprint(optopt)) {
-                    fprintf(stderr, "Unknown option `-%c'.\n", optopt);
-                } else {
-                    fprintf(stderr, "Unknown option character `\\x%x'.\n", optopt);
-                }
-            default:
-                abort();
-        }
+char *read_key_from_file(FILE *key_file);
+
+args_t *parse_cli_arguments(int argc, char **argv);
+
+unsigned char *gen_rdm_bytestream(size_t num_bytes) {
+    unsigned char *stream = malloc(num_bytes);
+    size_t i;
+
+    for (i = 0; i < num_bytes; i++) {
+        stream[i] = rand();
     }
-    if (optind == argc) {
-        perror("Must specify destination address and port.\n");
-        return NULL;
-    }
-    args->dest_addr = argv[optind++];
-    if (optind == argc) {
-        perror("Must specify destination port.\n");
-        return NULL;
-    }
-    args->dest_port = atoi(argv[optind]);
-    return args;
+    return stream;
 }
 
-
-ssize_t write_to_socket(FILE *ofp, struct pollfd *sock_poll_fd, int dest_sock_fd, char *data, ssize_t data_len) {
+ssize_t write_to_socket(FILE *ofp, struct pollfd *sock_poll_fd, int dest_sock_fd, void *data, ssize_t data_len) {
     int rv = poll(sock_poll_fd, 1, TIMEOUT);
     if (rv == -1) {
         perror("poll write error"); // error occurred in poll()
@@ -89,19 +62,24 @@ ssize_t write_to_socket(FILE *ofp, struct pollfd *sock_poll_fd, int dest_sock_fd
     if ((*sock_poll_fd).revents & POLLOUT) {
         return write(dest_sock_fd, data, data_len); // write
     }
-    // error in polling
-//            if (send_ufd.revents & POLL_ERR) {
-//                perror("Error occurred while polling forward socket for write");
-//                break;
-//            }
-//
-    // check for poll hung up
-//            if (send_ufd.revents & POLL_HUP) {
-//                perror("Connection hung up while polling forward socket for write");
-//                break;
-//            }
     return -1;
 }
+
+ssize_t
+write_to_socket_encrypted(FILE *ofp, struct pollfd *sock_poll_fd, int dest_sock_fd, char *data, ssize_t data_len,
+                          char *key) {
+//    fprintf(ofp, "wr: %d\n", data_len);
+    unsigned char *iv = gen_rdm_bytestream(CRYPTO_IV_LENGTH);
+    unsigned char encrypted_data[get_ct_size(data_len)];
+    int e_size = encrypt((unsigned char *) data, (int) data_len, (unsigned char *) key, iv,
+                         encrypted_data);
+    void *final_buf = malloc((size_t) (CRYPTO_IV_LENGTH + e_size));
+    memcpy(final_buf, iv, CRYPTO_IV_LENGTH);
+    memcpy(final_buf + CRYPTO_IV_LENGTH, encrypted_data, e_size);
+//    fprintf(ofp, "tot: %d, es: %d, wtse: %s", sizeof(encrypted_data), e_size, encrypted_data);
+    return write_to_socket(ofp, sock_poll_fd, dest_sock_fd, final_buf, CRYPTO_IV_LENGTH + e_size);
+}
+
 
 typedef struct f2s_command {
     FILE *ifp;
@@ -109,6 +87,7 @@ typedef struct f2s_command {
     int sock_fd;
     int *conn_broken;
     FILE *ofp;
+    char *crypto_key;
 } f2s_cmd_t;
 
 ssize_t read_fd(char *buf, size_t size, int fd) {
@@ -136,25 +115,86 @@ void client_file_to_socket(f2s_cmd_t *cmd) {
             fprintf(cmd->ofp, "send: %s", buffer);
         }
         // wait for write ready
-        ssize_t written_len = write_to_socket(cmd->ofp, cmd->pollfd, cmd->sock_fd, buffer, read_count);
-        if (written_len < 0) {
+        ssize_t written_len = write_to_socket_encrypted(cmd->ofp, cmd->pollfd, cmd->sock_fd, buffer, read_count,
+                                                        cmd->crypto_key);
+        if (written_len <= 0) {
             (*cmd->conn_broken) = 1;
             break;
         }
     }
 }
 
+int recv_and_decrypt(FILE *ofp, int sock_fd, char *buf, size_t buf_size, int flags, char *key) {
+    // first receive IV
+//    fprintf(ofp, "rr: %d\n", buf_size);
+    char combined_buf[buf_size + CRYPTO_IV_LENGTH];
+    ssize_t read_data_size = recv(sock_fd, combined_buf, buf_size + CRYPTO_IV_LENGTH, flags);
+
+    if (read_data_size <= 0) {
+//        perror("No data in receive!");
+        return read_data_size;
+    }// receive normal data
+    if (read_data_size < CRYPTO_IV_LENGTH) {
+//        perror("Didn't receive full IV!");
+        return read_data_size;
+    }
+    size_t ct_size = read_data_size - CRYPTO_IV_LENGTH;
+    char iv[CRYPTO_IV_LENGTH];
+    char cipher_text[ct_size];
+    memcpy(iv, combined_buf, CRYPTO_IV_LENGTH);
+    memcpy(cipher_text, combined_buf + CRYPTO_IV_LENGTH, ct_size);
+//    ssize_ct ct_size_actual = ((ct_size - CRYPTO_IV_LENGTH) / 16) * 16;
+    return decrypt(cipher_text, (int) ct_size, key, iv, buf);
+}
+
+void test_func(char *key) {
+    unsigned char *iv = gen_rdm_bytestream(16);
+    BIO_dump_fp(stdout, (const char *) iv, CRYPTO_IV_LENGTH);
+    unsigned char *plaintext =
+            (unsigned char *) "The quick brown fox jumps over the lazy dog";
+
+    /* Buffer for ciphertext. Ensure the buffer is long enough for the
+     * ciphertext which may be longer than the plaintext, dependant on the
+     * algorithm and mode
+     */
+    size_t pt_len = strlen(plaintext);
+    unsigned char ciphertext[CRYPTO_IV_LENGTH + pt_len];
+
+    /* Buffer for the decrypted text */
+    memcpy(ciphertext, iv, CRYPTO_IV_LENGTH);
+    int e_size = encrypt(plaintext, strlen(plaintext), (unsigned char *) key, iv, ciphertext + CRYPTO_IV_LENGTH);
+    printf("E_T_LEN: %d", e_size);
+    printf("Ciphertext is:\n");
+    BIO_dump_fp(stdout, (const char *) ciphertext, CRYPTO_IV_LENGTH + strlen(plaintext));
+
+    unsigned char decryptedtext[strlen(plaintext)];
+    /* Decrypt the ciphertext */
+    int decryptedtext_len = decrypt(ciphertext + CRYPTO_IV_LENGTH, e_size, (unsigned char *) key, iv,
+                                    (unsigned char *) decryptedtext);
+
+    /* Add a NULL terminator. We are expecting printable text */
+    printf("D_T_LEN: %d", decryptedtext_len);
+    printf("Decrypted text is:\n");
+    BIO_dump_fp(stdout, (const char *) decryptedtext, CRYPTO_IV_LENGTH + strlen(plaintext));
+    /* Show the decrypted text */
+}
+
 int main(int argc, char **argv) {
+    init_crypto();
     args = parse_cli_arguments(argc, argv);
     if (args == NULL) {
         perror("Some error occurred with input");
         return -2;
     }
+    srand((unsigned int) time(NULL));
     int fwd_sock_fd, portno;
     struct sockaddr_in fwd_serv_addr;
     FILE *ifp = stdin;
     FILE *ofp = !(args->is_debug) ? stderr : fopen(args->is_server ? "./logs/server-log.txt" : "./logs/client-log.txt",
                                                    "w");
+    FILE *key_file = fopen(args->key_file_path, "r");
+    char *crypto_key = read_key_from_file(key_file);
+//    test_func(crypto_key);
     portno = args->dest_port;
     char buffer[BUFF_SIZE];
     fwd_sock_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -236,15 +276,17 @@ int main(int argc, char **argv) {
                 } else {
                     // check for events on s1:
                     if (in_client_rcv_ufd.revents & POLLIN) {
-                        ssize_t nrecv = recv(connected_cli_socket_fd, buffer, BUFF_SIZE - 1, 0); // receive normal data
-                        if (nrecv < 0) {
+                        ssize_t nrecv = recv_and_decrypt(ofp, connected_cli_socket_fd, buffer, BUFF_SIZE - 1, 0,
+                                                         crypto_key);
+                        if (nrecv <= 0) {
                             break;
                         }
                         write_to_socket(ofp, &fwd_send_ufd, fwd_sock_fd, buffer, nrecv);
                     }
                     if (in_client_rcv_ufd.revents & POLLPRI) {
-                        ssize_t nrecv = recv(connected_cli_socket_fd, buffer, BUFF_SIZE - 1, MSG_OOB);
-                        if (nrecv < 0) {
+                        ssize_t nrecv = recv_and_decrypt(ofp, connected_cli_socket_fd, buffer, BUFF_SIZE - 1, MSG_OOB,
+                                                         crypto_key);
+                        if (nrecv <= 0) {
                             break;
                         }
                         write_to_socket(ofp, &fwd_send_ufd, fwd_sock_fd, buffer, nrecv);
@@ -274,17 +316,19 @@ int main(int argc, char **argv) {
                     // check for events on s1:
                     if (fwd_recv_ufd.revents & POLLIN) {
                         ssize_t nrecv = recv(fwd_sock_fd, buffer, BUFF_SIZE - 1, 0); // receive normal data
-                        if (nrecv < 0) {
+                        if (nrecv <= 0) {
                             break;
                         }
-                        write_to_socket(ofp, &in_client_send_ufd, connected_cli_socket_fd, buffer, nrecv);
+                        write_to_socket_encrypted(ofp, &in_client_send_ufd, connected_cli_socket_fd, buffer, nrecv,
+                                                  crypto_key);
                     }
                     if (fwd_recv_ufd.revents & POLLPRI) {
                         ssize_t nrecv = recv(fwd_sock_fd, buffer, BUFF_SIZE - 1, MSG_OOB); // out-of-band data
-                        if (nrecv < 0) {
+                        if (nrecv <= 0) {
                             break;
                         }
-                        write_to_socket(ofp, &in_client_send_ufd, connected_cli_socket_fd, buffer, nrecv);
+                        write_to_socket_encrypted(ofp, &in_client_send_ufd, connected_cli_socket_fd, buffer, nrecv,
+                                                  crypto_key);
                     }
 
 //            // error in polling
@@ -310,6 +354,7 @@ int main(int argc, char **argv) {
         cmd.sock_fd = fwd_sock_fd;
         cmd.pollfd = &fwd_send_ufd;
         cmd.conn_broken = &conn_broken;
+        cmd.crypto_key = crypto_key;
         int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
         if (fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK)) {
             perror("Failed to make stdin non-blocking\n");
@@ -332,7 +377,7 @@ int main(int argc, char **argv) {
 //                fprintf(f"Timeout occurred!  No read data after 3.5 seconds.\n");
             } else {
                 if (fwd_recv_ufd.revents & POLLIN) {
-                    ssize_t nrecv = recv(fwd_sock_fd, buffer, BUFF_SIZE - 1, 0); // receive normal data
+                    ssize_t nrecv = recv_and_decrypt(ofp, fwd_sock_fd, buffer, BUFF_SIZE - 1, 0, crypto_key);
                     if (nrecv <= 0) {
                         break;
                     }
@@ -342,7 +387,7 @@ int main(int argc, char **argv) {
                     }
                 }
                 if (fwd_recv_ufd.revents & POLLPRI) {
-                    ssize_t nrecv = recv(fwd_sock_fd, buffer, BUFF_SIZE - 1, MSG_OOB); // out-of-band data
+                    ssize_t nrecv = recv_and_decrypt(ofp, fwd_sock_fd, buffer, BUFF_SIZE - 1, MSG_OOB, crypto_key);
                     if (nrecv <= 0) {
                         break;
                     }
@@ -358,7 +403,65 @@ int main(int argc, char **argv) {
             fprintf(stderr, "Connection with server was broken");
         }
     }
-
     close(fwd_sock_fd);
+    fclose(key_file);
+    if (args->is_debug) {
+        fclose(ofp);
+    }
+    clean_up_crypto();
     return 0;
+}
+
+char *read_key_from_file(FILE *key_file) {
+    char buf[3];
+    char *key = (char *) malloc((CRYPTO_KEY_LENGTH + 1) * sizeof(char));
+    for (int i = 0; i < CRYPTO_KEY_LENGTH; i++) {
+        bzero(buf, 3);
+        fscanf(key_file, "%s", buf);
+        key[i] = (char) strtol(buf, NULL, 2);
+    }
+    return key;
+}
+
+args_t *parse_cli_arguments(int argc, char **argv) {
+    args_t *args = (args_t *) malloc(sizeof(args_t));
+    int c;
+    opterr = 0;
+    args->is_server = 0;
+    args->is_debug = 0;
+    while ((c = getopt(argc, argv, "k:l:d:")) != -1) {
+        switch (c) {
+            case 'l':
+                args->src_port = atoi(optarg);
+                args->is_server = 1;
+                break;
+            case 'd':
+                args->is_debug = 1;
+                break;
+            case 'k':
+                args->key_file_path = optarg;
+                break;
+            case '?':
+                if (optopt == 'l' || optopt == 'k') {
+                    fprintf(stderr, "Option -%c requires an argument. Char : %c\n", optopt, c);
+                } else if (isprint(optopt)) {
+                    fprintf(stderr, "Unknown option `-%c'.\n", optopt);
+                } else {
+                    fprintf(stderr, "Unknown option character `\\x%x'.\n", optopt);
+                }
+            default:
+                abort();
+        }
+    }
+    if (optind == argc) {
+        perror("Must specify destination address and port.\n");
+        return NULL;
+    }
+    args->dest_addr = argv[optind++];
+    if (optind == argc) {
+        perror("Must specify destination port.\n");
+        return NULL;
+    }
+    args->dest_port = atoi(argv[optind]);
+    return args;
 }
