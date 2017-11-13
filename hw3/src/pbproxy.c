@@ -12,12 +12,12 @@
 #include <pthread.h>
 #include <fcntl.h>
 #include <errno.h>
-#include "crypto.c"
+#include "ncrypto.c"
 
 #define TIMEOUT 0
-#define BUFF_SIZE 1024
-#define CRYPTO_KEY_LENGTH 32
-#define CRYPTO_IV_LENGTH 16
+#define BUFF_SIZE 256
+#define CRYPTO_KEY_LENGTH 16
+#define CRYPTO_IV_LENGTH 8
 
 void error(char *str) {
     perror(str);
@@ -43,7 +43,7 @@ unsigned char *gen_rdm_bytestream(size_t num_bytes) {
     size_t i;
 
     for (i = 0; i < num_bytes; i++) {
-        stream[i] = rand();
+        stream[i] = (unsigned char) rand();
     }
     return stream;
 }
@@ -69,15 +69,14 @@ ssize_t
 write_to_socket_encrypted(FILE *ofp, struct pollfd *sock_poll_fd, int dest_sock_fd, char *data, ssize_t data_len,
                           char *key) {
 //    fprintf(ofp, "wr: %d\n", data_len);
-    unsigned char *iv = gen_rdm_bytestream(CRYPTO_IV_LENGTH);
-    unsigned char encrypted_data[get_ct_size(data_len)];
-    int e_size = encrypt((unsigned char *) data, (int) data_len, (unsigned char *) key, iv,
-                         encrypted_data);
-    void *final_buf = malloc((size_t) (CRYPTO_IV_LENGTH + e_size));
+    char *iv = gen_rdm_bytestream(CRYPTO_IV_LENGTH);
+    unsigned char encrypted_data[data_len];
+    encrypt(data, data_len, key, iv, encrypted_data);
+    void *final_buf = malloc((size_t) (CRYPTO_IV_LENGTH + data_len));
     memcpy(final_buf, iv, CRYPTO_IV_LENGTH);
-    memcpy(final_buf + CRYPTO_IV_LENGTH, encrypted_data, e_size);
+    memcpy(final_buf + CRYPTO_IV_LENGTH, encrypted_data, data_len);
 //    fprintf(ofp, "tot: %d, es: %d, wtse: %s", sizeof(encrypted_data), e_size, encrypted_data);
-    return write_to_socket(ofp, sock_poll_fd, dest_sock_fd, final_buf, CRYPTO_IV_LENGTH + e_size);
+    return write_to_socket(ofp, sock_poll_fd, dest_sock_fd, final_buf, CRYPTO_IV_LENGTH + data_len) - CRYPTO_IV_LENGTH;
 }
 
 
@@ -144,43 +143,11 @@ int recv_and_decrypt(FILE *ofp, int sock_fd, char *buf, size_t buf_size, int fla
     memcpy(iv, combined_buf, CRYPTO_IV_LENGTH);
     memcpy(cipher_text, combined_buf + CRYPTO_IV_LENGTH, ct_size);
 //    ssize_ct ct_size_actual = ((ct_size - CRYPTO_IV_LENGTH) / 16) * 16;
-    return decrypt(cipher_text, (int) ct_size, key, iv, buf);
-}
-
-void test_func(char *key) {
-    unsigned char *iv = gen_rdm_bytestream(16);
-    BIO_dump_fp(stdout, (const char *) iv, CRYPTO_IV_LENGTH);
-    unsigned char *plaintext =
-            (unsigned char *) "The quick brown fox jumps over the lazy dog";
-
-    /* Buffer for ciphertext. Ensure the buffer is long enough for the
-     * ciphertext which may be longer than the plaintext, dependant on the
-     * algorithm and mode
-     */
-    size_t pt_len = strlen(plaintext);
-    unsigned char ciphertext[CRYPTO_IV_LENGTH + pt_len];
-
-    /* Buffer for the decrypted text */
-    memcpy(ciphertext, iv, CRYPTO_IV_LENGTH);
-    int e_size = encrypt(plaintext, strlen(plaintext), (unsigned char *) key, iv, ciphertext + CRYPTO_IV_LENGTH);
-    printf("E_T_LEN: %d", e_size);
-    printf("Ciphertext is:\n");
-    BIO_dump_fp(stdout, (const char *) ciphertext, CRYPTO_IV_LENGTH + strlen(plaintext));
-
-    unsigned char decryptedtext[strlen(plaintext)];
-    /* Decrypt the ciphertext */
-    int decryptedtext_len = decrypt(ciphertext + CRYPTO_IV_LENGTH, e_size, (unsigned char *) key, iv,
-                                    (unsigned char *) decryptedtext);
-
-    /* Add a NULL terminator. We are expecting printable text */
-    printf("D_T_LEN: %d", decryptedtext_len);
-    printf("Decrypted text is:\n");
-    BIO_dump_fp(stdout, (const char *) decryptedtext, CRYPTO_IV_LENGTH + strlen(plaintext));
-    /* Show the decrypted text */
+    decrypt(cipher_text, ct_size, key, iv, buf);
+    return ct_size;
 }
 
 int main(int argc, char **argv) {
-    init_crypto();
     args = parse_cli_arguments(argc, argv);
     if (args == NULL) {
         perror("Some error occurred with input");
@@ -408,7 +375,6 @@ int main(int argc, char **argv) {
     if (args->is_debug) {
         fclose(ofp);
     }
-    clean_up_crypto();
     return 0;
 }
 

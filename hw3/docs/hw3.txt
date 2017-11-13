@@ -5,7 +5,7 @@ Homework 3: Plugboard Proxy
 
 Submission deadline: 11/10/2017 11:59pm EDT
 Submission through https://blackboard.stonybrook.edu
-
+Consider for example the case of an SSH server with a public IP address. No
 
 In this assignment you will develop a "plugboard" proxy for adding an extra
 layer of protection to publicly accessible network services.
