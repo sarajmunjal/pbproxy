@@ -15,7 +15,7 @@
 #include "ncrypto.c"
 
 #define TIMEOUT 0
-#define BUFF_SIZE 256
+#define BUFF_SIZE 4096
 #define CRYPTO_KEY_LENGTH 16
 #define CRYPTO_IV_LENGTH 8
 
@@ -150,7 +150,7 @@ int recv_and_decrypt(FILE *ofp, int sock_fd, char *buf, size_t buf_size, int fla
 int main(int argc, char **argv) {
     args = parse_cli_arguments(argc, argv);
     if (args == NULL) {
-        perror("Some error occurred with input");
+        perror("Some error occurred with program arguments\n");
         return -2;
     }
     srand((unsigned int) time(NULL));
@@ -160,6 +160,10 @@ int main(int argc, char **argv) {
     FILE *ofp = !(args->is_debug) ? stderr : fopen(args->is_server ? "./logs/server-log.txt" : "./logs/client-log.txt",
                                                    "w");
     FILE *key_file = fopen(args->key_file_path, "r");
+    if (key_file == NULL) {
+        fprintf(stderr, "Could not find/open key file\n");
+        return -2;
+    }
     char *crypto_key = read_key_from_file(key_file);
 //    test_func(crypto_key);
     portno = args->dest_port;
@@ -211,7 +215,8 @@ int main(int argc, char **argv) {
 
         while (1) {
             if (args->is_debug) {
-                fprintf(ofp, "\nServer waiting for client on port %d", args->src_port);
+                fprintf(stdout, "\nServer waiting for client on port %d", args->src_port);
+                fflush(stdout);
             }
             if (listen(client_sock_fd, 5) == -1) {
                 perror("Error while trying to listen for client socket connection");
@@ -221,9 +226,9 @@ int main(int argc, char **argv) {
             size_t sin_size = sizeof(struct sockaddr_in);
             int connected_cli_socket_fd = accept(client_sock_fd, (struct sockaddr *) &in_client_addr, &sin_size);
             if (args->is_debug) {
-                fprintf(ofp, "\n I got a connection from (%s , %d)",
+                fprintf(stdout, "\n I got a connection from (%s , %d)",
                         inet_ntoa(in_client_addr.sin_addr), ntohs(in_client_addr.sin_port));
-                fflush(ofp);
+                fflush(stdout);
             }
 
             struct pollfd in_client_rcv_ufd, in_client_send_ufd;
@@ -367,7 +372,8 @@ int main(int argc, char **argv) {
         }
         pthread_join(client_write_thread, NULL);
         if (conn_broken) {
-            fprintf(stderr, "Connection with server was broken");
+            fprintf(stderr, "Connection with server was broken\n");
+            fflush(stderr);
         }
     }
     close(fwd_sock_fd);
@@ -395,7 +401,7 @@ args_t *parse_cli_arguments(int argc, char **argv) {
     opterr = 0;
     args->is_server = 0;
     args->is_debug = 0;
-    while ((c = getopt(argc, argv, "k:l:d:")) != -1) {
+    while ((c = getopt(argc, argv, "k:l:d")) != -1) {
         switch (c) {
             case 'l':
                 args->src_port = atoi(optarg);
@@ -418,6 +424,10 @@ args_t *parse_cli_arguments(int argc, char **argv) {
             default:
                 abort();
         }
+    }
+    if (args->key_file_path == NULL) {
+        fprintf(stderr, "Please specify path to key file\n");
+        return NULL;
     }
     if (optind == argc) {
         perror("Must specify destination address and port.\n");
