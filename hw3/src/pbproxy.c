@@ -66,17 +66,15 @@ ssize_t write_to_socket(FILE *ofp, struct pollfd *sock_poll_fd, int dest_sock_fd
 }
 
 ssize_t
-write_to_socket_encrypted(FILE *ofp, struct pollfd *sock_poll_fd, int dest_sock_fd, char *data, ssize_t data_len,
-                          char *key) {
-//    fprintf(ofp, "wr: %d\n", data_len);
-    char *iv = gen_rdm_bytestream(CRYPTO_IV_LENGTH);
-    unsigned char encrypted_data[data_len];
-    encrypt(data, data_len, key, iv, encrypted_data);
-    void *final_buf = malloc((size_t) (CRYPTO_IV_LENGTH + data_len));
-    memcpy(final_buf, iv, CRYPTO_IV_LENGTH);
-    memcpy(final_buf + CRYPTO_IV_LENGTH, encrypted_data, data_len);
+write_to_socket_encrypted(FILE *ofp, struct pollfd *sock_poll_fd, int dest_sock_fd, void *data, ssize_t data_len) {
+    void *final_buf = malloc((size_t) (data_len));
+    bzero(final_buf, data_len);
+    encrypt(data, data_len, final_buf);
 //    fprintf(ofp, "tot: %d, es: %d, wtse: %s", sizeof(encrypted_data), e_size, encrypted_data);
-    return write_to_socket(ofp, sock_poll_fd, dest_sock_fd, final_buf, CRYPTO_IV_LENGTH + data_len) - CRYPTO_IV_LENGTH;
+    ssize_t total_bytes_written = write_to_socket(ofp, sock_poll_fd, dest_sock_fd, final_buf, data_len);
+//    printf("Wrote %ld bytes with encryption\n", total_bytes_written);
+    fflush(stdout);
+    return total_bytes_written;
 }
 
 
@@ -114,8 +112,7 @@ void client_file_to_socket(f2s_cmd_t *cmd) {
             fprintf(cmd->ofp, "send: %s", buffer);
         }
         // wait for write ready
-        ssize_t written_len = write_to_socket_encrypted(cmd->ofp, cmd->pollfd, cmd->sock_fd, buffer, read_count,
-                                                        cmd->crypto_key);
+        ssize_t written_len = write_to_socket_encrypted(cmd->ofp, cmd->pollfd, cmd->sock_fd, buffer, read_count);
         if (written_len <= 0) {
             (*cmd->conn_broken) = 1;
             break;
@@ -126,25 +123,18 @@ void client_file_to_socket(f2s_cmd_t *cmd) {
 int recv_and_decrypt(FILE *ofp, int sock_fd, char *buf, size_t buf_size, int flags, char *key) {
     // first receive IV
 //    fprintf(ofp, "rr: %d\n", buf_size);
-    char combined_buf[buf_size + CRYPTO_IV_LENGTH];
-    ssize_t read_data_size = recv(sock_fd, combined_buf, buf_size + CRYPTO_IV_LENGTH, flags);
-
+    char combined_buf[buf_size];
+    bzero(combined_buf, 0);
+    ssize_t read_data_size = recv(sock_fd, combined_buf, buf_size, flags);
+//    printf("Read %ld bytes from socket %d\n", read_data_size, sock_fd);
+    fflush(stdout);
     if (read_data_size <= 0) {
 //        perror("No data in receive!");
         return read_data_size;
     }// receive normal data
-    if (read_data_size < CRYPTO_IV_LENGTH) {
-//        perror("Didn't receive full IV!");
-        return read_data_size;
-    }
-    size_t ct_size = read_data_size - CRYPTO_IV_LENGTH;
-    char iv[CRYPTO_IV_LENGTH];
-    char cipher_text[ct_size];
-    memcpy(iv, combined_buf, CRYPTO_IV_LENGTH);
-    memcpy(cipher_text, combined_buf + CRYPTO_IV_LENGTH, ct_size);
 //    ssize_ct ct_size_actual = ((ct_size - CRYPTO_IV_LENGTH) / 16) * 16;
-    decrypt(cipher_text, ct_size, key, iv, buf);
-    return ct_size;
+    decrypt(combined_buf, read_data_size, buf);
+    return read_data_size;
 }
 
 int main(int argc, char **argv) {
@@ -165,6 +155,7 @@ int main(int argc, char **argv) {
         return -2;
     }
     char *crypto_key = read_key_from_file(key_file);
+    set_key(crypto_key);
 //    test_func(crypto_key);
     portno = args->dest_port;
     char buffer[BUFF_SIZE];
@@ -214,10 +205,8 @@ int main(int argc, char **argv) {
         }
 
         while (1) {
-            if (args->is_debug) {
-                fprintf(stdout, "\nServer waiting for client on port %d", args->src_port);
-                fflush(stdout);
-            }
+            fprintf(stdout, "\nServer waiting for client on port %d", args->src_port);
+            fflush(stdout);
             if (listen(client_sock_fd, 5) == -1) {
                 perror("Error while trying to listen for client socket connection");
                 exit(1);
@@ -225,11 +214,9 @@ int main(int argc, char **argv) {
             fflush(ofp);
             size_t sin_size = sizeof(struct sockaddr_in);
             int connected_cli_socket_fd = accept(client_sock_fd, (struct sockaddr *) &in_client_addr, &sin_size);
-            if (args->is_debug) {
-                fprintf(stdout, "\n I got a connection from (%s , %d)",
-                        inet_ntoa(in_client_addr.sin_addr), ntohs(in_client_addr.sin_port));
-                fflush(stdout);
-            }
+            fprintf(stdout, "\nGot a connection from (%s , %d)\n", inet_ntoa(in_client_addr.sin_addr),
+                    ntohs(in_client_addr.sin_port));
+            fflush(stdout);
 
             struct pollfd in_client_rcv_ufd, in_client_send_ufd;
             in_client_rcv_ufd.fd = connected_cli_socket_fd;
@@ -237,6 +224,40 @@ int main(int argc, char **argv) {
 
             in_client_send_ufd.fd = connected_cli_socket_fd;
             in_client_send_ufd.events = POLLOUT;
+
+            //wait to read 8 bytes of IV before anything else
+            char *iv = malloc(CRYPTO_IV_LENGTH);
+            while (1) {
+                int rv = poll(&in_client_rcv_ufd, 1, TIMEOUT);
+
+                if (rv == -1) {
+                    perror("Error occurred in polling incoming client socket for reading IV."); // error occurred in poll()
+                } else if (rv == 0) {
+//                    printf("Timeout occurred!  No incoming data read from client after 3.5 seconds.\n");
+                } else {
+                    // check for events on s1:
+                    if (in_client_rcv_ufd.revents & POLLIN) {
+                        ssize_t nrecv = recv(connected_cli_socket_fd, iv, CRYPTO_IV_LENGTH, 0);
+                        if (nrecv < CRYPTO_IV_LENGTH) {
+                            perror("IV length can't be less than 8.");
+                            return -2;
+                        }
+                        break;
+                    }
+                    if (in_client_rcv_ufd.revents & POLLPRI) {
+                        ssize_t nrecv = recv(connected_cli_socket_fd, iv, CRYPTO_IV_LENGTH, MSG_OOB);
+                        if (nrecv < CRYPTO_IV_LENGTH) {
+                            perror("IV length can't be less than 8.");
+                            return -2;
+                        }
+                        break;
+                    }
+                }
+            }
+
+            //got IV now
+            init_iv(iv);
+
             while (1) {
                 bzero(buffer, BUFF_SIZE);
                 int rv = poll(&in_client_rcv_ufd, 1, TIMEOUT);
@@ -291,16 +312,14 @@ int main(int argc, char **argv) {
                         if (nrecv <= 0) {
                             break;
                         }
-                        write_to_socket_encrypted(ofp, &in_client_send_ufd, connected_cli_socket_fd, buffer, nrecv,
-                                                  crypto_key);
+                        write_to_socket_encrypted(ofp, &in_client_send_ufd, connected_cli_socket_fd, buffer, nrecv);
                     }
                     if (fwd_recv_ufd.revents & POLLPRI) {
                         ssize_t nrecv = recv(fwd_sock_fd, buffer, BUFF_SIZE - 1, MSG_OOB); // out-of-band data
                         if (nrecv <= 0) {
                             break;
                         }
-                        write_to_socket_encrypted(ofp, &in_client_send_ufd, connected_cli_socket_fd, buffer, nrecv,
-                                                  crypto_key);
+                        write_to_socket_encrypted(ofp, &in_client_send_ufd, connected_cli_socket_fd, buffer, nrecv);
                     }
 
 //            // error in polling
@@ -316,6 +335,7 @@ int main(int argc, char **argv) {
                 }
 
             }
+            clear_crypto_state();
         }
     } else {
         pthread_t client_write_thread;
@@ -336,6 +356,13 @@ int main(int argc, char **argv) {
             perror("Error creating separate client writing thread: ");
             return -2;
         }
+        unsigned char *iv = gen_rdm_bytestream(CRYPTO_IV_LENGTH);
+        ssize_t nwrite = write_to_socket(ofp, &fwd_send_ufd, fwd_sock_fd, iv, CRYPTO_IV_LENGTH);
+        if (nwrite < CRYPTO_IV_LENGTH) {
+            perror("IV write has length less than total!");
+            return -2;
+        }
+        init_iv(iv);
         while (1) {
             if (conn_broken) {
                 break;
