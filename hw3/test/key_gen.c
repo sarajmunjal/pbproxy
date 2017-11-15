@@ -24,9 +24,9 @@ unsigned char *gen_rdm_bytestream(size_t num_bytes) {
 
 int main() {
     srand((unsigned int) time(NULL));
-    FILE *outf = fopen("./keyfile", "w+");
+    FILE *outf = fopen("./mykey", "w+");
     printf("%d %d", get_ct_size(256), get_ct_size(1024));
-    char *str = gen_rdm_bytestream(32);
+    char *str = gen_rdm_bytestream(16);
     for (int i = 0; i < 32; i++) {
         fprintf(outf, "%02X ", str[i] & 0xFF);
     }
